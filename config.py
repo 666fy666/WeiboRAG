@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
 import os
+
+load_dotenv()  # 默认会加载根目录下的.env文件
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,7 +80,7 @@ class AppConfig:
 
     #: DeepSeek API 的访问密钥。
     deepseek_api_key: str = os.getenv(
-        "DEEPSEEK_API_KEY", "sk-754ddb7544314d708b11b1337271f9af"
+        "DEEPSEEK_API_KEY", ""
     )
 
     #: DeepSeek API 调用地址。
