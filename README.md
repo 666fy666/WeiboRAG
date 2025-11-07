@@ -39,14 +39,14 @@ WeiboRAG 用于汇总同一人物多个微博账号的历史内容，构建基�
 
 3. **运行主程序**
    ```bash
-   python main.py --query "你的下一场演唱会在什么时候？" --top-k 6 --show-context
+   python main.py --query "你的宇宙无敌号开到了哪些城市？" --top-k 6 --show-context
    ```
 
    常用参数说明（均可组合使用）：
 
    - `--query`：提出需要回答的问题。例如：
      ```bash
-     python main.py --query "请为黄霄雲的巡演总结亮点"
+     python main.py --query "你的宇宙无敌号开到了哪些城市？"
      ```
    - `--rebuild-index`：强制重新构建向量索引，适用于新增/修改微博数据后。例如：
      ```bash
