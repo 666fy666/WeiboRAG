@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from typing import List
+from typing import Dict, List, Optional
 
 from config import load_config
 from rag_modules import (
@@ -101,24 +101,57 @@ def main(argv: List[str] | None = None) -> int:
     )
 
     if not args.query:
-        logger.info("未提供 query，进入交互式模式（输入 exit 退出）")
+        logger.info("未提供 query，进入交互式模式（输入 exit 退出，输入 clear 清空对话历史）")
+        conversation_history: List[Dict[str, str]] = []
         while True:
             user_query = input("请输入问题: ").strip()
             if user_query.lower() in {"exit", "quit"}:
                 break
-            _run_query(user_query, retriever, generator, show_context=args.show_context)
+            if user_query.lower() == "clear":
+                conversation_history.clear()
+                logger.info("对话历史已清空")
+                continue
+            answer = _run_query(
+                user_query, 
+                retriever, 
+                generator, 
+                show_context=args.show_context,
+                conversation_history=conversation_history
+            )
+            # 将当前对话添加到历史中
+            if answer:
+                conversation_history.append({"role": "user", "content": user_query})
+                conversation_history.append({"role": "assistant", "content": answer})
         return 0
 
     _run_query(args.query, retriever, generator, show_context=args.show_context)
     return 0
 
 
-def _run_query(query: str, retriever: Retriever, generator: DeepSeekGenerator, show_context: bool) -> None:
+def _run_query(
+    query: str, 
+    retriever: Retriever, 
+    generator: DeepSeekGenerator, 
+    show_context: bool,
+    conversation_history: Optional[List[Dict[str, str]]] = None
+) -> Optional[str]:
+    """执行查询并返回回答。
+    
+    Args:
+        query: 用户查询
+        retriever: 检索器
+        generator: 生成器
+        show_context: 是否显示检索到的上下文
+        conversation_history: 可选的对话历史
+        
+    Returns:
+        生成的回答，如果未检索到相关内容则返回 None
+    """
     logger = logging.getLogger("WeiboRAG.Query")
     results = retriever.search(query)
     if not results:
         logger.info("未检索到相关内容")
-        return
+        return None
 
     if show_context:
         for idx, item in enumerate(results, start=1):
@@ -131,9 +164,11 @@ def _run_query(query: str, retriever: Retriever, generator: DeepSeekGenerator, s
             )
             logger.info("内容: %s", item.text)
 
-    answer_payload = generator.generate(query, results)
+    answer_payload = generator.generate(query, results, conversation_history=conversation_history)
+    answer = answer_payload.get("answer", "")
     print("\n=== 答复 ===")
-    print(answer_payload.get("answer", ""))
+    print(answer)
+    return answer
 """     print("\n=== 参考片段 ===")
     for idx, ctx in enumerate(answer_payload.get("contexts", []), start=1):
         print(
