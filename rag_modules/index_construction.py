@@ -54,14 +54,34 @@ class BGESentenceEncoder:
         return self._model
 
     def embed(self, texts: Iterable[str], batch_size: int = 16) -> np.ndarray:
-        """对文本批量编码并返回归一化后的向量。"""
+        """对文本批量编码并返回归一化后的向量。
+
+        Args:
+            texts: 文本迭代器
+            batch_size: 批处理大小
+
+        Returns:
+            归一化后的向量矩阵，形状为 (n_texts, embedding_dim)
+
+        Raises:
+            ValueError: 如果 batch_size <= 0
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size 必须大于 0，当前值: {batch_size}")
 
         vectors: List[np.ndarray] = []
         batch: List[str] = []
         for text in texts:
+            if not text or not text.strip():
+                self.logger.debug("跳过空文本")
+                continue
             batch.append(text)
             if len(batch) >= batch_size:
-                vectors.append(self._encode_batch(batch))
+                try:
+                    vectors.append(self._encode_batch(batch))
+                except Exception as exc:
+                    self.logger.error("批量编码失败，错误: %s", exc)
+                    raise
                 batch = []
 
         if batch:
@@ -73,11 +93,28 @@ class BGESentenceEncoder:
         return np.vstack(vectors)
 
     def _download_model(self) -> str:
-        cache_path = snapshot_download(
-            self.model_repo,
-            cache_dir=str(self.cache_dir) if self.cache_dir else None,
-        )
-        return cache_path or self.model_name
+        """下载模型到缓存目录。
+
+        Returns:
+            模型路径
+
+        Raises:
+            RuntimeError: 如果模型下载失败
+        """
+        try:
+            cache_path = snapshot_download(
+                self.model_repo,
+                cache_dir=str(self.cache_dir) if self.cache_dir else None,
+            )
+            if not cache_path:
+                self.logger.warning(
+                    "ModelScope 下载返回空路径，使用模型名称: %s", self.model_name
+                )
+                return self.model_name
+            return cache_path
+        except Exception as exc:
+            self.logger.error("下载模型失败: %s，错误: %s", self.model_repo, exc)
+            raise RuntimeError(f"无法下载模型 {self.model_repo}") from exc
 
     def _encode_batch(self, texts: List[str]) -> np.ndarray:
         tokenizer = self.tokenizer
@@ -141,31 +178,101 @@ class IndexBuilder:
         return self.vector_store_path.exists() and self.metadata_store_path.exists()
 
     def _load_cache(self) -> Tuple[faiss.Index, List[Dict[str, Any]]]:
-        index = faiss.read_index(str(self.vector_store_path))
-        with self.metadata_store_path.open("r", encoding="utf-8") as fp:
-            metadata: List[Dict[str, Any]] = json.load(fp)
+        """加载缓存的索引和元数据。
+
+        Returns:
+            索引对象和元数据列表
+
+        Raises:
+            RuntimeError: 如果加载失败
+        """
+        try:
+            index = faiss.read_index(str(self.vector_store_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法读取向量索引文件: {self.vector_store_path}"
+            ) from exc
+
+        try:
+            with self.metadata_store_path.open("r", encoding="utf-8") as fp:
+                metadata: List[Dict[str, Any]] = json.load(fp)
+        except (IOError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"无法读取元数据文件: {self.metadata_store_path}"
+            ) from exc
+
+        if not isinstance(metadata, list):
+            raise RuntimeError(f"元数据格式错误，应为列表: {self.metadata_store_path}")
+
         return index, metadata
 
-    def _rebuild_index(self, corpus: List[Dict[str, Any]]) -> Tuple[faiss.Index, List[Dict[str, Any]]]:
+    def _rebuild_index(
+        self, corpus: List[Dict[str, Any]]
+    ) -> Tuple[faiss.Index, List[Dict[str, Any]]]:
+        """重新构建索引。
+
+        Args:
+            corpus: 语料列表
+
+        Returns:
+            索引对象和元数据列表
+
+        Raises:
+            ValueError: 如果语料为空或格式错误
+            RuntimeError: 如果构建过程失败
+        """
         if not corpus:
             raise ValueError("传入的语料为空，无法构建索引")
 
-        texts = [item["text"] for item in corpus]
-        payloads = corpus
+        texts = []
+        payloads = []
+        for item in corpus:
+            if not isinstance(item, dict):
+                self.logger.warning("跳过非字典类型的语料项")
+                continue
+            text = item.get("text", "")
+            if not text or not text.strip():
+                self.logger.debug("跳过空文本块")
+                continue
+            texts.append(text)
+            payloads.append(item)
+
+        if not texts:
+            raise ValueError("没有有效的文本块可用于构建索引")
 
         self.logger.info("开始编码 %d 个文本块", len(texts))
-        embeddings = self.encoder.embed(texts)
+        try:
+            embeddings = self.encoder.embed(texts)
+        except Exception as exc:
+            raise RuntimeError("文本编码失败") from exc
+
         if embeddings.ndim != 2:
-            raise RuntimeError("嵌入结果形状错误")
+            raise RuntimeError(
+                f"嵌入结果形状错误，期望 2 维，实际 {embeddings.ndim} 维"
+            )
+
+        if embeddings.shape[0] == 0:
+            raise RuntimeError("编码后没有有效向量")
 
         dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
 
-        self.vector_store_path.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(index, str(self.vector_store_path))
-        with self.metadata_store_path.open("w", encoding="utf-8") as fp:
-            json.dump(payloads, fp, ensure_ascii=False, indent=2)
+        try:
+            self.vector_store_path.parent.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(index, str(self.vector_store_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法写入向量索引文件: {self.vector_store_path}"
+            ) from exc
+
+        try:
+            with self.metadata_store_path.open("w", encoding="utf-8") as fp:
+                json.dump(payloads, fp, ensure_ascii=False, indent=2)
+        except IOError as exc:
+            raise RuntimeError(
+                f"无法写入元数据文件: {self.metadata_store_path}"
+            ) from exc
 
         self.logger.info("索引构建完成，共 %d 条向量", index.ntotal)
         index = self._maybe_to_gpu(index)

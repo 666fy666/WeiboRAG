@@ -14,9 +14,12 @@ from typing import Dict, Iterable, List
 
 logger = logging.getLogger(__name__)
 
-
-_CONTROL_CHAR_PATTERN = re.compile(r"\s+")
-_LINK_PLACEHOLDER_PATTERN = re.compile(r"网页链接|原图|\[组图共\d+张]\s*")
+# 常量定义
+CONTROL_CHAR_PATTERN = re.compile(r"\s+")
+LINK_PLACEHOLDER_PATTERN = re.compile(r"网页链接|原图|\[组图共\d+张]\s*")
+URL_PATTERN = re.compile(r"https?://\S+")
+DEFAULT_ACCOUNT_NAME = "未知账号"
+ZERO_WIDTH_SPACE = "\u200b"
 
 
 @dataclass
@@ -67,9 +70,25 @@ class DataPreparationPipeline:
         self.logger = logging.getLogger(f"{__name__}.DataPreparationPipeline")
 
     def prepare_corpus(self) -> List[Dict[str, str]]:
-        """读取数据并生成文本块列表。"""
+        """读取数据并生成文本块列表。
+
+        Returns:
+            文本块列表，每个字典包含 id、text 和 metadata 字段
+
+        Raises:
+            ValueError: 如果数据目录不存在或无效
+        """
+        if not self.data_root.exists():
+            raise ValueError(f"数据目录不存在: {self.data_root}")
+
+        if not self.data_root.is_dir():
+            raise ValueError(f"数据路径不是目录: {self.data_root}")
 
         documents = list(self._load_documents())
+        if not documents:
+            self.logger.warning("未加载到任何文档，请检查数据目录和文件格式")
+            return []
+
         chunks: List[Dict[str, str]] = []
         for doc in documents:
             for idx, chunk in enumerate(self._chunk_text(doc.content)):
@@ -101,46 +120,87 @@ class DataPreparationPipeline:
                 continue
 
             user_info = payload.get("user", {})
+            if not isinstance(user_info, dict):
+                self.logger.warning("JSON 文件 %s 中的 user 字段格式异常，跳过", path)
+                continue
+
             account_id = str(user_info.get("id", ""))
-            account_name = str(user_info.get("nickname", "未知账号"))
+            account_name = str(user_info.get("nickname", DEFAULT_ACCOUNT_NAME))
             weibo_items = payload.get("weibo", [])
 
+            if not isinstance(weibo_items, list):
+                self.logger.warning("JSON 文件 %s 中的 weibo 字段不是列表，跳过", path)
+                continue
+
             for item in weibo_items:
-                content = self._clean_text(str(item.get("content", "")))
-                if len(content) < self.min_content_chars:
+                if not isinstance(item, dict):
+                    self.logger.debug("跳过非字典类型的微博条目: %s", path)
                     continue
 
-                stats = {
-                    "up_num": int(item.get("up_num", 0)),
-                    "retweet_num": int(item.get("retweet_num", 0)),
-                    "comment_num": int(item.get("comment_num", 0)),
-                }
-                extra = {
-                    "publish_tool": str(item.get("publish_tool", "")),
-                    "publish_place": str(item.get("publish_place", "")),
-                }
-                yield WeiboDocument(
-                    doc_id=str(item.get("id", "")) or f"{account_id}_{item.get('publish_time', '')}",
-                    account_id=account_id,
-                    account_name=account_name,
-                    publish_time=str(item.get("publish_time", "")),
-                    content=content,
-                    source_path=path,
-                    stats=stats,
-                    extra=extra,
-                )
+                content = self._clean_text(str(item.get("content", "")))
+                if len(content) < self.min_content_chars:
+                    self.logger.debug("跳过过短的微博内容: %s", path)
+                    continue
+
+                try:
+                    stats = {
+                        "up_num": int(item.get("up_num", 0)),
+                        "retweet_num": int(item.get("retweet_num", 0)),
+                        "comment_num": int(item.get("comment_num", 0)),
+                    }
+                    extra = {
+                        "publish_tool": str(item.get("publish_tool", "")),
+                        "publish_place": str(item.get("publish_place", "")),
+                    }
+                    doc_id = str(item.get("id", ""))
+                    if not doc_id:
+                        doc_id = f"{account_id}_{item.get('publish_time', '')}"
+
+                    yield WeiboDocument(
+                        doc_id=doc_id,
+                        account_id=account_id,
+                        account_name=account_name,
+                        publish_time=str(item.get("publish_time", "")),
+                        content=content,
+                        source_path=path,
+                        stats=stats,
+                        extra=extra,
+                    )
+                except (ValueError, KeyError) as exc:
+                    self.logger.warning(
+                        "处理微博条目时出错，文件: %s，错误: %s", path, exc
+                    )
+                    continue
 
     def _clean_text(self, text: str) -> str:
-        """对微博正文进行基础清洗。"""
+        """对微博正文进行基础清洗。
 
-        text = text.replace("\u200b", " ")
-        text = _LINK_PLACEHOLDER_PATTERN.sub("", text)
-        text = re.sub(r"https?://\S+", "", text)
-        text = _CONTROL_CHAR_PATTERN.sub(" ", text)
+        Args:
+            text: 原始文本
+
+        Returns:
+            清洗后的文本
+        """
+        if not text:
+            return ""
+
+        text = text.replace(ZERO_WIDTH_SPACE, " ")
+        text = LINK_PLACEHOLDER_PATTERN.sub("", text)
+        text = URL_PATTERN.sub("", text)
+        text = CONTROL_CHAR_PATTERN.sub(" ", text)
         return text.strip()
 
     def _chunk_text(self, text: str) -> Iterable[str]:
-        """根据配置将文本切分为多个块。"""
+        """根据配置将文本切分为多个块。
+
+        Args:
+            text: 待切分的文本
+
+        Yields:
+            文本块
+        """
+        if not text:
+            return
 
         if len(text) <= self.chunk_size:
             yield text
@@ -150,8 +210,9 @@ class DataPreparationPipeline:
         while start < len(text):
             end = min(start + self.chunk_size, len(text))
             chunk = text[start:end]
-            yield chunk
-            if end == len(text):
+            if chunk.strip():  # 只返回非空块
+                yield chunk
+            if end >= len(text):
                 break
             start = max(end - self.chunk_overlap, start + 1)
 

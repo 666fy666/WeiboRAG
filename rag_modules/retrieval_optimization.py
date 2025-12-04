@@ -19,7 +19,10 @@ from .index_construction import BGESentenceEncoder
 
 logger = logging.getLogger(__name__)
 
-_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|\w+")
+# 常量定义
+TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|\w+")
+LEXICAL_BOOST_BASE = 0.05
+MIN_LEXICAL_COVERAGE = 1e-9
 
 
 @dataclass
@@ -65,14 +68,29 @@ class Retriever:
         self._bm25_index = self._build_bm25_index(self._bm25_corpus_tokens)
 
     def search(self, query: str) -> List[RetrievalResult]:
-        """执行双路检索，并通过 RRF 融合返回结果。"""
+        """执行双路检索，并通过 RRF 融合返回结果。
 
-        if not query.strip():
+        Args:
+            query: 用户查询文本
+
+        Returns:
+            检索结果列表，按相关性排序
+
+        Raises:
+            ValueError: 如果查询为空
+            RuntimeError: 如果编码失败
+        """
+        if not query or not query.strip():
             raise ValueError("查询语句不能为空")
 
-        query_vec = self.encoder.embed([query])
+        try:
+            query_vec = self.encoder.embed([query])
+        except Exception as exc:
+            self.logger.error("编码查询失败: %s", exc)
+            raise RuntimeError("查询编码失败") from exc
+
         if query_vec.size == 0:
-            self.logger.warning("编码查询失败，返回空结果")
+            self.logger.warning("编码查询返回空向量，返回空结果")
             return []
 
         vector_hits = self._vector_search(query, query_vec)
@@ -176,15 +194,40 @@ class Retriever:
         return [(idx, score, details[idx]) for idx, score in fused]
 
     def _build_bm25_index(self, corpus_tokens: List[List[str]]) -> BM25Okapi | None:
+        """构建 BM25 索引。
+
+        Args:
+            corpus_tokens: 语料 token 列表
+
+        Returns:
+            BM25 索引对象，如果无法构建则返回 None
+        """
         if not corpus_tokens:
+            self.logger.warning("语料为空，跳过构建 BM25 索引")
             return None
+
         if all(len(tokens) == 0 for tokens in corpus_tokens):
             self.logger.warning("所有文本块都为空，跳过构建 BM25 索引")
             return None
-        return BM25Okapi(corpus_tokens)
+
+        try:
+            return BM25Okapi(corpus_tokens)
+        except Exception as exc:
+            self.logger.error("构建 BM25 索引失败: %s", exc)
+            return None
 
     def _lexical_boost(self, query: str, text: str) -> float:
-        """基于字符级 token 重合率的得分修正。"""
+        """基于字符级 token 重合率的得分修正。
+
+        Args:
+            query: 查询文本
+            text: 候选文本
+
+        Returns:
+            词汇提升分数
+        """
+        if not query or not text:
+            return 0.0
 
         query_tokens = self._tokenize_set(query)
         text_tokens = self._tokenize_set(text)
@@ -192,10 +235,14 @@ class Retriever:
             return 0.0
 
         overlaps = query_tokens.intersection(text_tokens)
-        coverage = len(overlaps) / max(len(query_tokens), 1)
-        if coverage == 0:
+        if not overlaps:
             return 0.0
-        return float(0.05 * math.log1p(coverage * len(text_tokens)))
+
+        coverage = len(overlaps) / max(len(query_tokens), 1)
+        if coverage < MIN_LEXICAL_COVERAGE:
+            return 0.0
+
+        return float(LEXICAL_BOOST_BASE * math.log1p(coverage * len(text_tokens)))
 
     @classmethod
     def _tokenize_set(cls, text: str) -> set[str]:
@@ -203,6 +250,20 @@ class Retriever:
 
     @staticmethod
     def _tokenize_list(text: str) -> List[str]:
-        return [match.group(0).lower() for match in _TOKEN_PATTERN.finditer(text) if match.group(0)]
+        """将文本分词为 token 列表。
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            token 列表（小写）
+        """
+        if not text:
+            return []
+        return [
+            match.group(0).lower()
+            for match in TOKEN_PATTERN.finditer(text)
+            if match.group(0)
+        ]
 
 

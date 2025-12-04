@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import requests
@@ -14,6 +15,13 @@ import requests
 from .retrieval_optimization import RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+# 常量定义
+DEFAULT_RETRIES = 3
+DEFAULT_BACKOFF = 2.0
+DEFAULT_TIMEOUT = 60
+DEFAULT_MODEL = "deepseek-chat"
+MAX_BACKOFF_MULTIPLIER = 3
 
 
 class DeepSeekGenerator:
@@ -48,15 +56,18 @@ class DeepSeekGenerator:
             conversation_history: 可选的对话历史，格式为 [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
         """
 
-        if not self.api_key:
+        if not self.api_key or not self.api_key.strip():
             raise ValueError("DeepSeek API Key 未配置")
+
+        if not query or not query.strip():
+            raise ValueError("查询文本不能为空")
 
         messages = self._build_messages(query, contexts, conversation_history)
         payload = {
-            "model": "deepseek-chat",
+            "model": DEFAULT_MODEL,
             "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_new_tokens,
+            "temperature": max(0.0, min(2.0, self.temperature)),  # 确保温度在有效范围内
+            "max_tokens": max(1, self.max_new_tokens),
         }
 
         headers = {
@@ -64,11 +75,28 @@ class DeepSeekGenerator:
             "Content-Type": "application/json",
         }
 
-        response = self._post_with_retry(payload, headers)
-        data = response.json()
-        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        try:
+            response = self._post_with_retry(payload, headers)
+            data = response.json()
+        except Exception as exc:
+            self.logger.error("API 调用失败: %s", exc)
+            raise RuntimeError("生成回答失败") from exc
+
+        # 安全地提取回答
+        choices = data.get("choices", [])
+        if not choices:
+            self.logger.warning("API 响应中没有 choices 字段")
+            return {
+                "answer": "",
+                "contexts": [self._format_context(item) for item in contexts],
+                "raw": data,
+            }
+
+        message = choices[0].get("message", {})
+        answer = message.get("content", "")
+
         return {
-            "answer": answer.strip(),
+            "answer": answer.strip() if answer else "",
             "contexts": [self._format_context(item) for item in contexts],
             "raw": data,
         }
@@ -95,8 +123,7 @@ class DeepSeekGenerator:
             ]
         )
 
-        import datetime
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         
         # 构建消息列表
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -119,19 +146,54 @@ class DeepSeekGenerator:
         
         return messages
 
-    def _post_with_retry(self, payload: Dict[str, object], headers: Dict[str, str]) -> requests.Response:
-        retries = 3
-        backoff = 2.0
-        for attempt in range(1, retries + 1):
+    def _post_with_retry(
+        self, payload: Dict[str, object], headers: Dict[str, str]
+    ) -> requests.Response:
+        """带重试的 POST 请求。
+
+        Args:
+            payload: 请求载荷
+            headers: 请求头
+
+        Returns:
+            HTTP 响应对象
+
+        Raises:
+            requests.RequestException: 如果所有重试都失败
+        """
+        for attempt in range(1, DEFAULT_RETRIES + 1):
             try:
-                response = requests.post(self.api_url, json=payload, headers=headers, timeout=60)
+                response = requests.post(
+                    self.api_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=DEFAULT_TIMEOUT,
+                )
                 response.raise_for_status()
                 return response
+            except requests.Timeout as exc:
+                self.logger.warning(
+                    "DeepSeek 调用超时（第 %d/%d 次）", attempt, DEFAULT_RETRIES
+                )
+                if attempt == DEFAULT_RETRIES:
+                    raise RuntimeError("API 调用超时，已重试所有次数") from exc
+            except requests.HTTPError as exc:
+                # HTTP 错误（4xx, 5xx）不重试
+                self.logger.error("DeepSeek API 返回 HTTP 错误: %s", exc)
+                raise
             except requests.RequestException as exc:  # pylint: disable=broad-except
-                self.logger.error("DeepSeek 调用失败（第 %d 次）: %s", attempt, exc)
-                if attempt == retries:
-                    raise
-                time.sleep(backoff * attempt)
+                self.logger.warning(
+                    "DeepSeek 调用失败（第 %d/%d 次）: %s", attempt, DEFAULT_RETRIES, exc
+                )
+                if attempt == DEFAULT_RETRIES:
+                    raise RuntimeError(
+                        f"API 调用失败，已重试 {DEFAULT_RETRIES} 次"
+                    ) from exc
+
+            # 指数退避
+            backoff_time = DEFAULT_BACKOFF * min(attempt, MAX_BACKOFF_MULTIPLIER)
+            time.sleep(backoff_time)
+
         raise RuntimeError("DeepSeek 调用失败")
 
     @staticmethod

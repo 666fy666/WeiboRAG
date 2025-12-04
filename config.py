@@ -5,15 +5,26 @@
 
 from __future__ import annotations
 
-from dotenv import load_dotenv
 import os
-
-load_dotenv()  # 默认会加载根目录下的.env文件
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# 默认会加载根目录下的 .env 文件
+load_dotenv()
+
 
 def _bool_env(name: str, default: bool) -> bool:
+    """从环境变量读取布尔值。
+
+    Args:
+        name: 环境变量名称
+        default: 默认值
+
+    Returns:
+        解析后的布尔值，支持的字符串包括：1, true, yes, y, on
+    """
     value = os.getenv(name)
     if value is None:
         return default
@@ -114,15 +125,29 @@ class AppConfig:
     )
 
     def ensure_directories(self) -> None:
-        """确保运行所需的目录存在。"""
+        """确保运行所需的目录存在。
 
-        self.data_root.mkdir(parents=True, exist_ok=True)
-        self.vector_dir.mkdir(parents=True, exist_ok=True)
+        Raises:
+            OSError: 如果目录创建失败
+        """
+        try:
+            self.data_root.mkdir(parents=True, exist_ok=True)
+            self.vector_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"无法创建必要的目录: data_root={self.data_root}, vector_dir={self.vector_dir}"
+            ) from exc
 
 
 def load_config() -> AppConfig:
-    """载入配置并准备环境。"""
+    """载入配置并准备环境。
 
+    Returns:
+        配置对象实例
+
+    Raises:
+        OSError: 如果目录创建失败
+    """
     config = AppConfig()
     config.ensure_directories()
     return config
