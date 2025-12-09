@@ -97,6 +97,7 @@ uv_cache/
 # Logs
 logs/
 *.log
+nohup.out
 
 # OS generated files
 .DS_Store
