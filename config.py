@@ -89,12 +89,34 @@ class AppConfig:
     #: RRF 融合时的平滑参数。
     rrf_k: float = float(os.getenv("RRF_K", "60"))
 
-    #: DeepSeek API 的访问密钥。
-    deepseek_api_key: str = os.getenv(
-        "DEEPSEEK_API_KEY", ""
+    #: LLM 提供商名称（deepseek、openai、qwen）。
+    llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek").lower()
+
+    #: LLM API 的访问密钥（根据提供商选择对应的环境变量）。
+    llm_api_key: str = os.getenv(
+        "LLM_API_KEY",
+        os.getenv(
+            "DEEPSEEK_API_KEY",  # 向后兼容
+            os.getenv("OPENAI_API_KEY", os.getenv("QWEN_API_KEY", "")),
+        ),
     )
 
-    #: DeepSeek API 调用地址。
+    #: LLM API 调用地址（可选，使用提供商默认值）。
+    llm_api_url: str | None = os.getenv(
+        "LLM_API_URL",
+        os.getenv(
+            "DEEPSEEK_API_URL",  # 向后兼容
+            None,
+        ),
+    )
+
+    #: LLM 模型名称（可选，使用提供商默认值）。
+    llm_model_name: str | None = os.getenv("LLM_MODEL_NAME", None)
+
+    #: DeepSeek API 的访问密钥（向后兼容，已废弃，使用 LLM_API_KEY）。
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
+
+    #: DeepSeek API 调用地址（向后兼容，已废弃，使用 LLM_API_URL）。
     deepseek_api_url: str = os.getenv(
         "DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions"
     )

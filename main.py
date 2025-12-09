@@ -13,9 +13,10 @@ from typing import Dict, List, Optional
 from config import load_config
 from rag_modules import (
     DataPreparationPipeline,
-    DeepSeekGenerator,
     IndexBuilder,
+    LLMGenerator,
     Retriever,
+    create_llm_generator,
 )
 from rag_modules.index_construction import BGESentenceEncoder
 
@@ -39,6 +40,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="是否在控制台输出检索到的上下文",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="启动 Web 服务器模式",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Web 服务器端口（默认：8000）",
+    )
     return parser
 
 
@@ -61,6 +73,20 @@ def main(argv: List[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     configure_logging()
     logger = logging.getLogger("WeiboRAG")
+
+    # Web 模式
+    if args.web:
+        logger.info("启动 Web 服务器模式...")
+        try:
+            import uvicorn
+            from web_app import app
+
+            uvicorn.run(app, host="0.0.0.0", port=args.port)
+        except ImportError as exc:
+            logger.error("Web 模式需要安装 uvicorn: %s", exc)
+            logger.error("请运行: uv pip install uvicorn[standard]")
+            return 1
+        return 0
 
     try:
         config = load_config()
@@ -121,13 +147,26 @@ def main(argv: List[str] | None = None) -> int:
         return 1
 
     try:
-        generator = DeepSeekGenerator(
-            api_key=config.deepseek_api_key,
-            api_url=config.deepseek_api_url,
+        # 向后兼容：如果配置了deepseek_api_key但没有配置llm_api_key，使用deepseek_api_key
+        api_key = config.llm_api_key
+        if not api_key and config.deepseek_api_key:
+            api_key = config.deepseek_api_key
+            logger.info("使用向后兼容的 DEEPSEEK_API_KEY")
+
+        api_url = config.llm_api_url
+        if not api_url and config.deepseek_api_url:
+            api_url = config.deepseek_api_url
+
+        generator = create_llm_generator(
+            provider=config.llm_provider,
+            api_key=api_key,
+            api_url=api_url,
+            model_name=config.llm_model_name,
             max_new_tokens=config.max_new_tokens,
             temperature=config.temperature,
             system_prompt=config.system_prompt,
         )
+        logger.info("使用 LLM 提供商: %s", config.llm_provider)
     except Exception as exc:
         logger.error("生成器初始化失败: %s", exc, exc_info=True)
         return 1
@@ -195,7 +234,7 @@ def main(argv: List[str] | None = None) -> int:
 def _run_query(
     query: str,
     retriever: Retriever,
-    generator: DeepSeekGenerator,
+    generator: LLMGenerator,
     show_context: bool,
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[str]:
